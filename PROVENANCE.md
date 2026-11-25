@@ -1,0 +1,9 @@
+# Provenance and licensing
+
+Retro-Runtime commit `2cd2e8549e1e6c166b13cc0615ed5aa6bf9b40a2` supplies `state/state_envelope.hpp`, `state/state_envelope.cpp`, `runner/sha256.hpp`, `runner/sha256.cpp` and the envelope fixture extracted from `tests/overlay_test.cpp`. Their MIT notice is in `LICENSES/RETRO-RUNTIME-MIT.txt`; source comments identify that license. The neutral SlotStore adapts the capture/check/restore boundary from `runner/state_keeper.*`, without depending on a loaded runtime, host session, core-link process or a specific console.
+
+Genesis commit `403bf4f2c960644c35fca8d8c9a1aa7d03858846` supplies `runner/host_atomic_file.*` and `runner/persist_writer.*`, renamed as atomic_file/native_writer. Those sources and headers retain PolyForm Noncommercial terms in the root LICENSE. The engine-specific worker is replaced with a private portable C++ future adapter implementing the same submit/poll/join surface. Native-write callbacks remain immutable snapshots with producer-thread completion reporting.
+
+Extraction changes include a neutral standalone build, explicit serializer/identity bindings, asynchronous compressed slot storage, bounded rewind bytes, exclusive atomic state publication, size checks before allocation and strict current-build identity in SlotStore. The original envelope's file layout/version is retained; codec/decoded-size/decoded-hash fields extend its text metadata. No old-state migration or compatibility promise is added. No production source, engine pin, user save or settings were changed.
+
+New glue and fixtures are author-owned under the root license. Zlib is an external build dependency and retains its own license. SHA-256 implementation comments retain the donor's public-domain algorithm attribution. No copyrighted game input, generated guest code, private communication or personal data is part of this repository.
