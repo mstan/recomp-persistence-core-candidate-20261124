@@ -249,7 +249,7 @@ bool write_state(const fs::path& path, StateHeader header, const std::vector<std
     put_u64(head, size);
     if (size) head.append(static_cast<const char*>(state), static_cast<std::size_t>(size));
     const auto utf8_path=path.u8string();
-    if (!recomp_atomic_file_store(utf8_path.c_str(), head.data(), head.size()))
+    if (!recomp_atomic_file_store(reinterpret_cast<const char*>(utf8_path.c_str()), head.data(), head.size()))
         return fail("atomic state publication failed");
     return true;
 }
