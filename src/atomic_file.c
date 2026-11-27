@@ -5,6 +5,7 @@
 #endif
 #include "recomp_persistence/atomic_file.h"
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,11 +20,12 @@
 #include <unistd.h>
 #endif
 
+enum { ATOMIC_REPLACE, ATOMIC_CREATE, NATIVE_EXCLUSIVE_CREATE };
 struct RecompAtomicFile {
     FILE *stream;
     char *target, *temporary;
     uint64_t limit, written;
-    int failed, owns_temporary, create_only;
+    int failed, owns_temporary, mode;
 #ifdef _WIN32
     wchar_t *wide_target, *wide_temporary;
 #endif
@@ -91,7 +93,7 @@ static int atomic_replace_windows(RecompAtomicFile *file,HANDLE *publication)
         size_t size=prefix+bytes+sizeof(WCHAR);
         AtomicRenameInfo *info=calloc(1,size);
         if(!info)return 0;
-        info->flags=file->create_only?2:3;info->bytes=(DWORD)bytes;
+        info->flags=file->mode==ATOMIC_CREATE?2:3;info->bytes=(DWORD)bytes;
         memcpy(info->name,file->wide_target,bytes);
         int ok=set_info(*publication,22,info,(DWORD)size)!=0;
         error=ok?ERROR_SUCCESS:GetLastError();
@@ -102,7 +104,7 @@ static int atomic_replace_windows(RecompAtomicFile *file,HANDLE *publication)
        error!=ERROR_NOT_SUPPORTED&&error!=ERROR_CALL_NOT_IMPLEMENTED)return 0;
     CloseHandle(*publication);*publication=INVALID_HANDLE_VALUE;
     return MoveFileExW(file->wide_temporary,file->wide_target,
-                       (file->create_only?0:MOVEFILE_REPLACE_EXISTING)|MOVEFILE_WRITE_THROUGH)!=0;
+                       (file->mode==ATOMIC_CREATE?0:MOVEFILE_REPLACE_EXISTING)|MOVEFILE_WRITE_THROUGH)!=0;
 }
 #else
 static char *atomic_absolute_path(const char *path)
@@ -142,25 +144,26 @@ static FILE *atomic_open_exclusive(RecompAtomicFile *file)
 #ifdef _WIN32
     /* Deny other writers. Delete sharing allows a following complete commit
      * to replace this version before its short-lived publication handle closes. */
-    HANDLE handle=CreateFileW(file->wide_temporary,GENERIC_WRITE|DELETE,
-                              FILE_SHARE_READ|FILE_SHARE_DELETE,NULL,CREATE_NEW,
+    const int direct=file->mode==NATIVE_EXCLUSIVE_CREATE;
+    HANDLE handle=CreateFileW(file->wide_temporary,GENERIC_WRITE|(direct?0:DELETE),
+                              direct?0:FILE_SHARE_READ|FILE_SHARE_DELETE,NULL,CREATE_NEW,
                               FILE_ATTRIBUTE_NORMAL,NULL);
     if(handle==INVALID_HANDLE_VALUE){
         DWORD error=GetLastError();
         errno=(error==ERROR_FILE_EXISTS||error==ERROR_ALREADY_EXISTS)?EEXIST:EIO;
         return NULL;
     }
-    file->owns_temporary=1;
+    file->owns_temporary=!direct;
     int fd=_open_osfhandle((intptr_t)handle,_O_WRONLY|_O_BINARY);
     if(fd<0){CloseHandle(handle);return NULL;}
     FILE *stream=_fdopen(fd,"wb");
     if(!stream)_close(fd);
     return stream;
 #else
-    if(file->create_only){
+    if(file->mode!=ATOMIC_REPLACE){
         int fd=open(file->temporary,O_WRONLY|O_CREAT|O_EXCL,0600);
         if(fd<0)return NULL;
-        file->owns_temporary=1;
+        file->owns_temporary=file->mode!=NATIVE_EXCLUSIVE_CREATE;
         FILE *stream=fdopen(fd,"wb");
         if(!stream)close(fd);
         return stream;
@@ -188,12 +191,12 @@ void recomp_atomic_file_abort(RecompAtomicFile *file)
     free(file->target);free(file->temporary);free(file);
 }
 
-static RecompAtomicFile *atomic_begin(const char *path,uint64_t max_bytes,int create_only)
+static RecompAtomicFile *atomic_begin(const char *path,uint64_t max_bytes,int mode)
 {
     if(!path||!*path||strlen(path)>SIZE_MAX-64)return NULL;
     RecompAtomicFile *file=calloc(1,sizeof *file);
     if(!file)return NULL;
-    file->target=atomic_absolute_path(path);file->limit=max_bytes;file->create_only=create_only;
+    file->target=atomic_absolute_path(path);file->limit=max_bytes;file->mode=mode;
     if(!file->target||strlen(file->target)>SIZE_MAX-64)goto failed;
     size_t capacity=strlen(file->target)+64;
     file->temporary=malloc(capacity);
@@ -205,6 +208,16 @@ static RecompAtomicFile *atomic_begin(const char *path,uint64_t max_bytes,int cr
 #else
     unsigned long pid=(unsigned long)getpid();
 #endif
+    if(mode==NATIVE_EXCLUSIVE_CREATE){
+        memcpy(file->temporary,file->target,strlen(file->target)+1);
+#ifdef _WIN32
+        file->wide_temporary=atomic_wide_path(file->temporary);
+        if(!file->wide_temporary)goto failed;
+#endif
+        file->stream=atomic_open_exclusive(file);
+        if(file->stream)return file;
+        goto failed;
+    }
     /* Live allocations are distinct between concurrent transactions. Exclusive
      * creation also preserves stale/foreign files after address/PID reuse. */
     for(unsigned attempt=0;attempt<16;++attempt){
@@ -223,9 +236,9 @@ failed:
 }
 
 RecompAtomicFile *recomp_atomic_file_begin(const char *path,uint64_t max_bytes)
-{ return atomic_begin(path,max_bytes,0); }
+{ return atomic_begin(path,max_bytes,ATOMIC_REPLACE); }
 RecompAtomicFile *recomp_atomic_file_begin_create(const char *path,uint64_t max_bytes)
-{ return atomic_begin(path,max_bytes,1); }
+{ return atomic_begin(path,max_bytes,ATOMIC_CREATE); }
 
 int recomp_atomic_file_write(RecompAtomicFile *file,const void *data,size_t bytes)
 {
@@ -234,7 +247,31 @@ int recomp_atomic_file_write(RecompAtomicFile *file,const void *data,size_t byte
     if((!data&&bytes)||(uint64_t)bytes>file->limit-file->written){
         file->failed=1;return 0;
     }
-    if(bytes&&fwrite(data,1,bytes,file->stream)!=bytes){file->failed=1;return 0;}
+    if(file->mode==NATIVE_EXCLUSIVE_CREATE){
+        /* Retain native creation's write semantics, including POSIX short
+         * writes/EINTR. The FILE owns this same descriptor/handle but has no
+         * buffered I/O; commit still owns synchronization and final close. */
+        size_t offset=0;
+        while(offset<bytes){
+#ifdef _WIN32
+            size_t remaining=bytes-offset;
+            DWORD chunk=remaining>UINT32_MAX?UINT32_MAX:(DWORD)remaining;
+            DWORD written=0;
+            if(!WriteFile((HANDLE)_get_osfhandle(_fileno(file->stream)),
+                          (const unsigned char*)data+offset,chunk,&written,NULL)||written!=chunk){
+                file->failed=1;return 0;
+            }
+            offset+=written;
+#else
+            size_t remaining=bytes-offset;
+            if(remaining>(size_t)SSIZE_MAX)remaining=(size_t)SSIZE_MAX;
+            ssize_t written=write(fileno(file->stream),(const unsigned char*)data+offset,remaining);
+            if(written<0&&errno==EINTR)continue;
+            if(written<=0){file->failed=1;return 0;}
+            offset+=(size_t)written;
+#endif
+        }
+    }else if(bytes&&fwrite(data,1,bytes,file->stream)!=bytes){file->failed=1;return 0;}
     file->written+=(uint64_t)bytes;return 1;
 }
 
@@ -252,7 +289,7 @@ int recomp_atomic_file_commit(RecompAtomicFile *file)
 #ifdef _WIN32
     HANDLE publication=INVALID_HANDLE_VALUE;
     if(ok&&_commit(_fileno(file->stream)))ok=0;
-    if(ok&&!DuplicateHandle(GetCurrentProcess(),(HANDLE)_get_osfhandle(_fileno(file->stream)),
+    if(ok&&file->mode!=NATIVE_EXCLUSIVE_CREATE&&!DuplicateHandle(GetCurrentProcess(),(HANDLE)_get_osfhandle(_fileno(file->stream)),
                              GetCurrentProcess(),&publication,0,FALSE,DUPLICATE_SAME_ACCESS))ok=0;
 #else
     if(ok&&fsync(fileno(file->stream)))ok=0;
@@ -262,12 +299,12 @@ int recomp_atomic_file_commit(RecompAtomicFile *file)
 #ifdef _WIN32
     /* The stream must close successfully before publication. Its duplicated
      * DELETE-capable handle retains ownership for the handle-based rename. */
-    if(ok)ok=atomic_replace_windows(file,&publication);
+    if(ok&&file->mode!=NATIVE_EXCLUSIVE_CREATE)ok=atomic_replace_windows(file,&publication);
     if(publication!=INVALID_HANDLE_VALUE)CloseHandle(publication);
     if(ok)file->owns_temporary=0;
 #else
-    if(ok){
-        if(file->create_only){
+    if(ok&&file->mode!=NATIVE_EXCLUSIVE_CREATE){
+        if(file->mode==ATOMIC_CREATE){
             /* link atomically creates a new directory entry, refusing every
              * existing target kind. Abort removes our remaining staging link;
              * the complete published inode stays live at the final name. */
@@ -281,20 +318,18 @@ int recomp_atomic_file_commit(RecompAtomicFile *file)
     recomp_atomic_file_abort(file);return ok;
 }
 
-int recomp_atomic_file_store(const char *path,const void *data,size_t bytes)
+static int atomic_store(const char *path,const void *data,size_t bytes,int mode)
 {
     if(!data&&bytes)return 0;
-    RecompAtomicFile *file=recomp_atomic_file_begin(path,(uint64_t)bytes);
+    RecompAtomicFile *file=atomic_begin(path,(uint64_t)bytes,mode);
     if(!file)return 0;
     if(!recomp_atomic_file_write(file,data,bytes)){recomp_atomic_file_abort(file);return 0;}
     return recomp_atomic_file_commit(file);
 }
 
+int recomp_atomic_file_store(const char *path,const void *data,size_t bytes)
+{ return atomic_store(path,data,bytes,ATOMIC_REPLACE); }
 int recomp_atomic_file_create(const char *path,const void *data,size_t bytes)
-{
-    if(!data&&bytes)return 0;
-    RecompAtomicFile *file=recomp_atomic_file_begin_create(path,(uint64_t)bytes);
-    if(!file)return 0;
-    if(!recomp_atomic_file_write(file,data,bytes)){recomp_atomic_file_abort(file);return 0;}
-    return recomp_atomic_file_commit(file);
-}
+{ return atomic_store(path,data,bytes,ATOMIC_CREATE); }
+int recomp_file_create_exclusive(const char *path,const void *data,size_t bytes)
+{ return atomic_store(path,data,bytes,NATIVE_EXCLUSIVE_CREATE); }

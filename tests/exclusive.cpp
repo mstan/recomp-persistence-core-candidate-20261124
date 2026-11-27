@@ -64,16 +64,24 @@ int main() {
     std::thread first(create,std::cref(original),std::ref(a)),second(create,std::cref(other),std::ref(b));
     while(ready.load()!=2)std::this_thread::yield();go=true;first.join();second.join();
     CHECK(a+b==1);CHECK(read(race)==(a?original:other));
+    const auto native=root/"native-exclusive";const auto native_name=utf8(native);
+    CHECK(recomp_file_create_exclusive(native_name.c_str(),original.data(),original.size()));
+    CHECK(read(native)==original);
+    CHECK(!recomp_file_create_exclusive(native_name.c_str(),other.data(),other.size()));
+    CHECK(read(native)==original);
+    CHECK(!recomp_file_create_exclusive(empty_name.c_str(),other.data(),other.size()));
+    CHECK(fs::file_size(empty)==0);
+    CHECK(!recomp_file_create_exclusive(utf8(dir).c_str(),other.data(),other.size()));
     const auto link=root/"existing-link";std::error_code link_error;
     fs::create_symlink(path,link,link_error);
-    if(!link_error){CHECK(!recomp_atomic_file_create(utf8(link).c_str(),other.data(),other.size()));CHECK(read(path)==original);CHECK(fs::is_symlink(link));CHECK(fs::remove(link));}
+    if(!link_error){CHECK(!recomp_atomic_file_create(utf8(link).c_str(),other.data(),other.size()));CHECK(!recomp_file_create_exclusive(utf8(link).c_str(),other.data(),other.size()));CHECK(read(path)==original);CHECK(fs::is_symlink(link));CHECK(fs::remove(link));}
     else std::printf("symlink fixture unavailable on this host: %s\n",link_error.message().c_str());
 #ifndef _WIN32
     struct stat mode{};CHECK(stat(name.c_str(),&mode)==0);CHECK((mode.st_mode&0777)==0600);
 #endif
     // Successful and failed transactions leave no staging names behind.
     for(auto &entry:fs::directory_iterator(root))CHECK(utf8(entry.path().filename()).find(".tmp-")==std::string::npos);
-    for(const auto &p:{path,empty,late,root/"relative",race,dir})CHECK(fs::remove(p));
+    for(const auto &p:{path,empty,late,root/"relative",race,dir,native})CHECK(fs::remove(p));
     CHECK(fs::remove(root));
     std::puts("exclusive publication: UTF8, existing/late targets, quota/abort, CWD, racing complete creators and cleanup pass");
 }

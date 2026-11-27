@@ -40,6 +40,13 @@ void recomp_atomic_file_abort(RecompAtomicFile *);
 /* Buffer convenience API using the same transaction owner. */
 int recomp_atomic_file_store(const char *, const void *, size_t);
 int recomp_atomic_file_create(const char *, const void *, size_t);
+/* Native exclusive creation, matching CREATE_NEW/O_EXCL on every writable
+ * filesystem, including those without staging-link/rename support. Never
+ * opens an existing target. Uses the same bounded write/flush/close owner,
+ * but exposes the newly created name while writing and leaves an incomplete
+ * new file on error. Select this only when that existing caller contract is
+ * intended; success still requires all bytes, synchronization and close. */
+int recomp_file_create_exclusive(const char *, const void *, size_t);
 #ifdef __cplusplus
 }
 #endif
