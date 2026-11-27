@@ -11,6 +11,14 @@ APIs retain their behavior. UTF-8 paths, CWD binding, limits and failed-write
 rollback use the same owner. The fixture exercises both normal and older Windows
 publication paths; Linux/macOS CI checks the actual POSIX filesystem operation.
 
+`recomp_file_create_exclusive` preserves native `CREATE_NEW`/`O_EXCL` semantics
+when the caller must support filesystems without atomic staging publication.
+It uses the same writer and synchronization owner, never opens an existing file,
+and requires a complete successful write/flush/close. The new name is visible
+during writing and an incomplete newly created file may remain after an error,
+matching native creation. This profile is appropriate for creating an empty
+memory-card image; it is distinct from atomic replacement of an existing save.
+
 Current licensing and the grant for existing owner contributions are documented in [LICENSE-SCOPE.md](LICENSE-SCOPE.md).
 
 Private host-native persistence extraction, built without a console runtime or game inputs. It combines Retro-Runtime snapshot envelopes and identity checks with Genesis immutable asynchronous native-save writing and exclusive atomic publication. Production consumers remain unchanged.
