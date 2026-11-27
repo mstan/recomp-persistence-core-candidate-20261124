@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-License-Identifier: MIT
 // Extracted from segagenesisrecomp; see PROVENANCE.md.
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>
+#include <wchar.h>
 #else
 #include <unistd.h>
 #endif
@@ -34,14 +35,72 @@ static wchar_t *atomic_wide_path(const char *path)
     if(!n)return NULL;
     wchar_t *w=malloc((size_t)n*sizeof *w);
     if(w&&!MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path,-1,w,n)){free(w);return NULL;}
-    return w;
+    if(!w)return NULL;
+    /* FileRenameInfoEx needs an absolute destination. Freeze the Windows
+     * paths before exposing a transaction rather than trusting later CWD. */
+    DWORD capacity=GetFullPathNameW(w,0,NULL,NULL);
+    if(!capacity){free(w);return NULL;}
+    wchar_t *absolute=malloc((size_t)capacity*sizeof *absolute);
+    DWORD count=absolute?GetFullPathNameW(w,capacity,absolute,NULL):0;
+    free(w);
+    if(!count||count>=capacity){free(absolute);return NULL;}
+    return absolute;
+}
+
+/* FILE_RENAME_INFO's Windows ABI, including SDKs predating its Flags union.
+ * Microsoft documents REPLACE_IF_EXISTS (1) + POSIX_SEMANTICS (2) here:
+ * https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
+ * FileRenameInfoEx is class22; unsupported OS/filesystem classes retain the
+ * existing closed-source MoveFileExW path, never truncate/delete the target. */
+typedef struct {
+    DWORD flags;
+    HANDLE root;
+    DWORD bytes;
+    WCHAR name[1];
+} AtomicRenameInfo;
+typedef BOOL (WINAPI *AtomicSetFileInfo)(HANDLE,int,LPVOID,DWORD);
+
+static int atomic_replace_windows(RecompAtomicFile *file,HANDLE *publication)
+{
+    AtomicSetFileInfo set_info=NULL;
+#ifndef RECOMP_ATOMIC_TEST_LEGACY_RENAME
+    HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
+    if(kernel){
+        FARPROC address=GetProcAddress(kernel,"SetFileInformationByHandle");
+        _Static_assert(sizeof address==sizeof set_info,"Windows procedure pointer ABI");
+        memcpy(&set_info,&address,sizeof set_info);
+    }
+#endif
+    DWORD error=ERROR_CALL_NOT_IMPLEMENTED;
+    if(set_info){
+        size_t bytes=wcslen(file->wide_target)*sizeof(WCHAR);
+        size_t prefix=offsetof(AtomicRenameInfo,name);
+        if(bytes>UINT32_MAX-prefix-sizeof(WCHAR))return 0;
+        size_t size=prefix+bytes+sizeof(WCHAR);
+        AtomicRenameInfo *info=calloc(1,size);
+        if(!info)return 0;
+        info->flags=3;info->bytes=(DWORD)bytes;
+        memcpy(info->name,file->wide_target,bytes);
+        int ok=set_info(*publication,22,info,(DWORD)size)!=0;
+        error=ok?ERROR_SUCCESS:GetLastError();
+        free(info);
+        if(ok)return 1;
+    }
+    if(error!=ERROR_INVALID_PARAMETER&&error!=ERROR_INVALID_FUNCTION&&
+       error!=ERROR_NOT_SUPPORTED&&error!=ERROR_CALL_NOT_IMPLEMENTED)return 0;
+    CloseHandle(*publication);*publication=INVALID_HANDLE_VALUE;
+    return MoveFileExW(file->wide_temporary,file->wide_target,
+                       MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
 }
 #endif
 
 static FILE *atomic_open_exclusive(RecompAtomicFile *file)
 {
 #ifdef _WIN32
-    HANDLE handle=CreateFileW(file->wide_temporary,GENERIC_WRITE,0,NULL,CREATE_NEW,
+    /* Deny other writers. Delete sharing allows a following complete commit
+     * to replace this version before its short-lived publication handle closes. */
+    HANDLE handle=CreateFileW(file->wide_temporary,GENERIC_WRITE|DELETE,
+                              FILE_SHARE_READ|FILE_SHARE_DELETE,NULL,CREATE_NEW,
                               FILE_ATTRIBUTE_NORMAL,NULL);
     if(handle==INVALID_HANDLE_VALUE){
         DWORD error=GetLastError();
@@ -134,15 +193,20 @@ int recomp_atomic_file_commit(RecompAtomicFile *file)
     if(!file)return 0;
     int ok=recomp_atomic_file_flush(file);
 #ifdef _WIN32
+    HANDLE publication=INVALID_HANDLE_VALUE;
     if(ok&&_commit(_fileno(file->stream)))ok=0;
+    if(ok&&!DuplicateHandle(GetCurrentProcess(),(HANDLE)_get_osfhandle(_fileno(file->stream)),
+                             GetCurrentProcess(),&publication,0,FALSE,DUPLICATE_SAME_ACCESS))ok=0;
 #else
     if(ok&&fsync(fileno(file->stream)))ok=0;
 #endif
     if(fclose(file->stream))ok=0;
     file->stream=NULL;
 #ifdef _WIN32
-    if(ok&&!MoveFileExW(file->wide_temporary,file->wide_target,
-                        MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))ok=0;
+    /* The stream must close successfully before publication. Its duplicated
+     * DELETE-capable handle retains ownership for the handle-based rename. */
+    if(ok)ok=atomic_replace_windows(file,&publication);
+    if(publication!=INVALID_HANDLE_VALUE)CloseHandle(publication);
 #else
     if(ok&&rename(file->temporary,file->target))ok=0;
 #endif

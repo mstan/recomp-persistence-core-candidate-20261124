@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-License-Identifier: MIT
 // Extracted from segagenesisrecomp; see PROVENANCE.md.
 #ifndef RECOMP_HOST_ATOMIC_FILE_H
 #define RECOMP_HOST_ATOMIC_FILE_H
@@ -24,7 +24,10 @@ int recomp_atomic_file_flush(RecompAtomicFile *);
 /* Both operations consume the handle, including on failure. Commit returns
  * success only after publication. Abort, failed writes and failed publication
  * preserve the prior destination and remove only this transaction's temporary.
- * Concurrent commits publish complete files in their actual commit order. */
+ * Concurrent commits publish complete files in their actual commit order.
+ * Windows handle-based replacement accepts delete-sharing open targets where
+ * supported; the older atomic-move fallback safely refuses unavailable cases.
+ * A caller retaining a backing handle must reopen the committed destination. */
 int recomp_atomic_file_commit(RecompAtomicFile *);
 void recomp_atomic_file_abort(RecompAtomicFile *);
 /* Buffer convenience API using the same transaction owner. */

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -59,6 +60,19 @@ int main() {
         CHECK(!recomp_atomic_file_store("native.sav",initial,4));
         CHECK(read("native.sav")[0]==99);
         CloseHandle(locked);
+    }
+    CHECK(recomp_atomic_file_store("shareable.sav",initial,4));
+    HANDLE shareable=CreateFileW(L"shareable.sav",GENERIC_READ|GENERIC_WRITE,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,nullptr);
+    CHECK(shareable!=INVALID_HANDLE_VALUE);
+    if(shareable!=INVALID_HANDLE_VALUE){
+        CHECK(recomp_atomic_file_store("shareable.sav",latest,4));
+        CHECK(read("shareable.sav")==std::vector<unsigned char>(latest,latest+4));
+        unsigned char retired[4]={};DWORD received=0;
+        CHECK(ReadFile(shareable,retired,4,&received,nullptr)&&received==4);
+        CHECK(!std::memcmp(retired,initial,4));
+        CloseHandle(shareable);
     }
 #endif
     std::filesystem::create_directory("destination-directory");
