@@ -35,16 +35,27 @@ static wchar_t *atomic_wide_path(const char *path)
     if(!n)return NULL;
     wchar_t *w=malloc((size_t)n*sizeof *w);
     if(w&&!MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path,-1,w,n)){free(w);return NULL;}
+    return w;
+}
+
+static char *atomic_absolute_path(const char *path)
+{
+    wchar_t *w=atomic_wide_path(path);
     if(!w)return NULL;
-    /* FileRenameInfoEx needs an absolute destination. Freeze the Windows
-     * paths before exposing a transaction rather than trusting later CWD. */
+    /* Resolve the caller's path once. Both target and staging names derive
+     * from this binding, including if another owner later changes CWD. */
     DWORD capacity=GetFullPathNameW(w,0,NULL,NULL);
     if(!capacity){free(w);return NULL;}
     wchar_t *absolute=malloc((size_t)capacity*sizeof *absolute);
     DWORD count=absolute?GetFullPathNameW(w,capacity,absolute,NULL):0;
     free(w);
     if(!count||count>=capacity){free(absolute);return NULL;}
-    return absolute;
+    int bytes=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,absolute,-1,NULL,0,NULL,NULL);
+    char *result=bytes?malloc((size_t)bytes):NULL;
+    if(result&&!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,absolute,-1,result,bytes,NULL,NULL)){
+        free(result);result=NULL;
+    }
+    free(absolute);return result;
 }
 
 /* FILE_RENAME_INFO's Windows ABI, including SDKs predating its Flags union.
@@ -91,6 +102,37 @@ static int atomic_replace_windows(RecompAtomicFile *file,HANDLE *publication)
     CloseHandle(*publication);*publication=INVALID_HANDLE_VALUE;
     return MoveFileExW(file->wide_temporary,file->wide_target,
                        MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+}
+#else
+static char *atomic_absolute_path(const char *path)
+{
+    size_t length=strlen(path);
+    if(path[0]=='/'){
+        char *result=malloc(length+1);
+        if(result)memcpy(result,path,length+1);
+        return result;
+    }
+    size_t capacity=256;
+    char *working;
+    for(;;){
+        working=malloc(capacity);
+        if(!working)return NULL;
+        if(getcwd(working,capacity))break;
+        int error=errno;
+        free(working);
+        if(error!=ERANGE||capacity>SIZE_MAX/2)return NULL;
+        capacity*=2;
+    }
+    size_t prefix=strlen(working);
+    if(prefix>SIZE_MAX-length-2){free(working);return NULL;}
+    char *result=malloc(prefix+length+2);
+    if(result){
+        memcpy(result,working,prefix);
+        if(prefix&&working[prefix-1]!='/')result[prefix++]='/';
+        /* Do not realpath or lexically collapse the caller's symlinks/.. . */
+        memcpy(result+prefix,path,length+1);
+    }
+    free(working);return result;
 }
 #endif
 
@@ -142,12 +184,13 @@ RecompAtomicFile *recomp_atomic_file_begin(const char *path,uint64_t max_bytes)
     if(!path||!*path||strlen(path)>SIZE_MAX-64)return NULL;
     RecompAtomicFile *file=calloc(1,sizeof *file);
     if(!file)return NULL;
-    size_t length=strlen(path)+1,capacity=length+63;
-    file->target=malloc(length);file->temporary=malloc(capacity);file->limit=max_bytes;
-    if(!file->target||!file->temporary)goto failed;
-    memcpy(file->target,path,length);
+    file->target=atomic_absolute_path(path);file->limit=max_bytes;
+    if(!file->target||strlen(file->target)>SIZE_MAX-64)goto failed;
+    size_t capacity=strlen(file->target)+64;
+    file->temporary=malloc(capacity);
+    if(!file->temporary)goto failed;
 #ifdef _WIN32
-    file->wide_target=atomic_wide_path(path);
+    file->wide_target=atomic_wide_path(file->target);
     if(!file->wide_target)goto failed;
     unsigned long pid=GetCurrentProcessId();
 #else
@@ -156,7 +199,7 @@ RecompAtomicFile *recomp_atomic_file_begin(const char *path,uint64_t max_bytes)
     /* Live allocations are distinct between concurrent transactions. Exclusive
      * creation also preserves stale/foreign files after address/PID reuse. */
     for(unsigned attempt=0;attempt<16;++attempt){
-        (void)snprintf(file->temporary,capacity,"%s.tmp-%lu-%p-%u",path,pid,(void*)file,attempt);
+        (void)snprintf(file->temporary,capacity,"%s.tmp-%lu-%p-%u",file->target,pid,(void*)file,attempt);
 #ifdef _WIN32
         free(file->wide_temporary);
         file->wide_temporary=atomic_wide_path(file->temporary);

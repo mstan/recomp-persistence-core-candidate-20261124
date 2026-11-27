@@ -8,8 +8,9 @@
 extern "C" {
 #endif
 typedef struct RecompAtomicFile RecompAtomicFile;
-/* UTF-8 path on Windows, native path bytes on POSIX. The transaction copies
- * the path and owns an exclusive same-directory temporary. max_bytes is an
+/* UTF-8 path on Windows, native path bytes on POSIX. Begin binds an absolute
+ * target once and derives its exclusive same-directory temporary from it.
+ * Relative paths remain valid through later process CWD changes. max_bytes is an
  * inclusive resource limit, including zero for an empty file. No worker,
  * whole-file buffer or serializer is introduced. Calls on one transaction
  * must be serialized; independent transactions may target the same file. */

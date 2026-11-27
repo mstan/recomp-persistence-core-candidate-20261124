@@ -118,6 +118,32 @@ int main() {
     stream=recomp_atomic_file_begin("native.sav",0);CHECK(stream);
     recomp_atomic_file_abort(stream);
     CHECK(read("foreign.tmp")==std::vector<unsigned char>({'u','n','t','o','u','c','h','e','d'}));
+    // Relative paths belong to the transaction, not the process's later CWD.
+    const auto original_directory=std::filesystem::current_path();
+    const auto owner_directory=original_directory/"cwd-owner";
+    const auto other_directory=original_directory/"cwd-other";
+    std::filesystem::create_directories(owner_directory);
+    std::filesystem::create_directories(other_directory/"cwd-owner");
+    std::ofstream(other_directory/"cwd-owner/owned.sav")<<"foreign";
+    CHECK(recomp_atomic_file_store("cwd-owner/owned.sav",latest,4));
+    stream=recomp_atomic_file_begin("cwd-owner/owned.sav",4);CHECK(stream);
+    CHECK(recomp_atomic_file_write(stream,initial,4));
+    std::filesystem::current_path(other_directory);
+    CHECK(recomp_atomic_file_commit(stream));
+    CHECK(read((owner_directory/"owned.sav").u8string().c_str())==std::vector<unsigned char>(initial,initial+4));
+    std::filesystem::current_path(original_directory);
+    stream=recomp_atomic_file_begin("cwd-owner/owned.sav",4);CHECK(stream);
+    CHECK(recomp_atomic_file_write(stream,latest,4));
+    std::filesystem::current_path(other_directory);
+    recomp_atomic_file_abort(stream);
+    CHECK(read((owner_directory/"owned.sav").u8string().c_str())==std::vector<unsigned char>(initial,initial+4));
+    CHECK(read("cwd-owner/owned.sav")==std::vector<unsigned char>({'f','o','r','e','i','g','n'}));
+    unsigned owned_files=0;
+    for(const auto& entry:std::filesystem::directory_iterator(owner_directory)){
+        ++owned_files;CHECK(entry.path().filename()=="owned.sav");
+    }
+    CHECK(owned_files==1);
+    std::filesystem::current_path(original_directory);
     for(const auto& entry:std::filesystem::directory_iterator("."))
         CHECK(entry.path().filename().string().find(".tmp-")==std::string::npos);
     return failures?1:0;
