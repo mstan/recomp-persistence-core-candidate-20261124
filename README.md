@@ -1,5 +1,16 @@
 # recomp-persistence-core
 
+The streaming atomic-file owner also provides `recomp_atomic_file_begin_create`
+and `recomp_atomic_file_create` for final-name creation without replacement.
+An existing file, save, directory or symlink is never opened for writing.
+Concurrent creators have exactly one winner, and readers see the complete
+flushed file. Windows uses its atomic rename without the replacement flag;
+POSIX uses atomic hard-link publication of private staging. Unsupported
+filesystems fail without a check-then-rename fallback. The existing replacement
+APIs retain their behavior. UTF-8 paths, CWD binding, limits and failed-write
+rollback use the same owner. The fixture exercises both normal and older Windows
+publication paths; Linux/macOS CI checks the actual POSIX filesystem operation.
+
 Current licensing and the grant for existing owner contributions are documented in [LICENSE-SCOPE.md](LICENSE-SCOPE.md).
 
 Private host-native persistence extraction, built without a console runtime or game inputs. It combines Retro-Runtime snapshot envelopes and identity checks with Genesis immutable asynchronous native-save writing and exclusive atomic publication. Production consumers remain unchanged.
