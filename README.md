@@ -1,5 +1,7 @@
 # recomp-persistence-core
 
+Current licensing and the grant for existing owner contributions are documented in [LICENSE-SCOPE.md](LICENSE-SCOPE.md).
+
 Private host-native persistence extraction, built without a console runtime or game inputs. It combines Retro-Runtime snapshot envelopes and identity checks with Genesis immutable asynchronous native-save writing and exclusive atomic publication. Production consumers remain unchanged.
 
 ## Build and link
