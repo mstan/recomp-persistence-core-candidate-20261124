@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <wchar.h>
 #else
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -22,7 +23,7 @@ struct RecompAtomicFile {
     FILE *stream;
     char *target, *temporary;
     uint64_t limit, written;
-    int failed, owns_temporary;
+    int failed, owns_temporary, create_only;
 #ifdef _WIN32
     wchar_t *wide_target, *wide_temporary;
 #endif
@@ -90,7 +91,7 @@ static int atomic_replace_windows(RecompAtomicFile *file,HANDLE *publication)
         size_t size=prefix+bytes+sizeof(WCHAR);
         AtomicRenameInfo *info=calloc(1,size);
         if(!info)return 0;
-        info->flags=3;info->bytes=(DWORD)bytes;
+        info->flags=file->create_only?2:3;info->bytes=(DWORD)bytes;
         memcpy(info->name,file->wide_target,bytes);
         int ok=set_info(*publication,22,info,(DWORD)size)!=0;
         error=ok?ERROR_SUCCESS:GetLastError();
@@ -101,7 +102,7 @@ static int atomic_replace_windows(RecompAtomicFile *file,HANDLE *publication)
        error!=ERROR_NOT_SUPPORTED&&error!=ERROR_CALL_NOT_IMPLEMENTED)return 0;
     CloseHandle(*publication);*publication=INVALID_HANDLE_VALUE;
     return MoveFileExW(file->wide_temporary,file->wide_target,
-                       MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+                       (file->create_only?0:MOVEFILE_REPLACE_EXISTING)|MOVEFILE_WRITE_THROUGH)!=0;
 }
 #else
 static char *atomic_absolute_path(const char *path)
@@ -156,6 +157,14 @@ static FILE *atomic_open_exclusive(RecompAtomicFile *file)
     if(!stream)_close(fd);
     return stream;
 #else
+    if(file->create_only){
+        int fd=open(file->temporary,O_WRONLY|O_CREAT|O_EXCL,0600);
+        if(fd<0)return NULL;
+        file->owns_temporary=1;
+        FILE *stream=fdopen(fd,"wb");
+        if(!stream)close(fd);
+        return stream;
+    }
     FILE *stream=fopen(file->temporary,"wbx");
     if(stream)file->owns_temporary=1;
     return stream;
@@ -179,12 +188,12 @@ void recomp_atomic_file_abort(RecompAtomicFile *file)
     free(file->target);free(file->temporary);free(file);
 }
 
-RecompAtomicFile *recomp_atomic_file_begin(const char *path,uint64_t max_bytes)
+static RecompAtomicFile *atomic_begin(const char *path,uint64_t max_bytes,int create_only)
 {
     if(!path||!*path||strlen(path)>SIZE_MAX-64)return NULL;
     RecompAtomicFile *file=calloc(1,sizeof *file);
     if(!file)return NULL;
-    file->target=atomic_absolute_path(path);file->limit=max_bytes;
+    file->target=atomic_absolute_path(path);file->limit=max_bytes;file->create_only=create_only;
     if(!file->target||strlen(file->target)>SIZE_MAX-64)goto failed;
     size_t capacity=strlen(file->target)+64;
     file->temporary=malloc(capacity);
@@ -212,6 +221,11 @@ RecompAtomicFile *recomp_atomic_file_begin(const char *path,uint64_t max_bytes)
 failed:
     recomp_atomic_file_abort(file);return NULL;
 }
+
+RecompAtomicFile *recomp_atomic_file_begin(const char *path,uint64_t max_bytes)
+{ return atomic_begin(path,max_bytes,0); }
+RecompAtomicFile *recomp_atomic_file_begin_create(const char *path,uint64_t max_bytes)
+{ return atomic_begin(path,max_bytes,1); }
 
 int recomp_atomic_file_write(RecompAtomicFile *file,const void *data,size_t bytes)
 {
@@ -250,10 +264,20 @@ int recomp_atomic_file_commit(RecompAtomicFile *file)
      * DELETE-capable handle retains ownership for the handle-based rename. */
     if(ok)ok=atomic_replace_windows(file,&publication);
     if(publication!=INVALID_HANDLE_VALUE)CloseHandle(publication);
-#else
-    if(ok&&rename(file->temporary,file->target))ok=0;
-#endif
     if(ok)file->owns_temporary=0;
+#else
+    if(ok){
+        if(file->create_only){
+            /* link atomically creates a new directory entry, refusing every
+             * existing target kind. Abort removes our remaining staging link;
+             * the complete published inode stays live at the final name. */
+            if(link(file->temporary,file->target))ok=0;
+        }else{
+            if(rename(file->temporary,file->target))ok=0;
+            else file->owns_temporary=0;
+        }
+    }
+#endif
     recomp_atomic_file_abort(file);return ok;
 }
 
@@ -261,6 +285,15 @@ int recomp_atomic_file_store(const char *path,const void *data,size_t bytes)
 {
     if(!data&&bytes)return 0;
     RecompAtomicFile *file=recomp_atomic_file_begin(path,(uint64_t)bytes);
+    if(!file)return 0;
+    if(!recomp_atomic_file_write(file,data,bytes)){recomp_atomic_file_abort(file);return 0;}
+    return recomp_atomic_file_commit(file);
+}
+
+int recomp_atomic_file_create(const char *path,const void *data,size_t bytes)
+{
+    if(!data&&bytes)return 0;
+    RecompAtomicFile *file=recomp_atomic_file_begin_create(path,(uint64_t)bytes);
     if(!file)return 0;
     if(!recomp_atomic_file_write(file,data,bytes)){recomp_atomic_file_abort(file);return 0;}
     return recomp_atomic_file_commit(file);

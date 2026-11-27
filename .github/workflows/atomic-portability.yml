@@ -1,0 +1,21 @@
+name: Atomic file portability
+on:
+  pull_request:
+    paths: ['src/atomic_file.c', 'include/recomp_persistence/atomic_file.h', 'tests/exclusive.cpp', '.github/workflows/atomic-portability.yml']
+  push:
+    branches: [main]
+    paths: ['src/atomic_file.c', 'include/recomp_persistence/atomic_file.h', 'tests/exclusive.cpp', '.github/workflows/atomic-portability.yml']
+jobs:
+  atomic-create:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile C ABI and concurrent creation fixture
+        run: |
+          cc -std=c11 -Wall -Wextra -Iinclude -c src/atomic_file.c -o atomic.o
+          c++ -std=c++17 -Wall -Wextra -pthread -Iinclude tests/exclusive.cpp atomic.o -o exclusive-test
+      - name: Check real filesystem publication
+        run: ./exclusive-test

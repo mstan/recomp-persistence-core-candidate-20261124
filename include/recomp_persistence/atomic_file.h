@@ -15,12 +15,18 @@ typedef struct RecompAtomicFile RecompAtomicFile;
  * whole-file buffer or serializer is introduced. Calls on one transaction
  * must be serialized; independent transactions may target the same file. */
 RecompAtomicFile *recomp_atomic_file_begin(const char *path, uint64_t max_bytes);
+/* Creation profile: publish only if the final name is still absent at commit.
+ * Existing regular files, saves, directories and symlinks are never replaced or
+ * opened for writing. Concurrent creators have exactly one successful winner.
+ * POSIX staging is private (0600); atomic link publication must be supported by
+ * the destination filesystem. No check-then-rename fallback is used. */
+RecompAtomicFile *recomp_atomic_file_begin_create(const char *path, uint64_t max_bytes);
 /* Append all bytes or mark the transaction failed. A failed/over-limit write
  * is sticky: commit can never publish it. NULL data is valid only for zero
  * bytes. The caller retains its input as soon as write returns. */
 int recomp_atomic_file_write(RecompAtomicFile *, const void *, size_t);
 /* Flush staging bytes; commit additionally synchronizes the file before
- * closing and replacing the destination with the platform's atomic operation. */
+ * closing and publishing under the selected replacement/creation profile. */
 int recomp_atomic_file_flush(RecompAtomicFile *);
 /* Both operations consume the handle, including on failure. Commit returns
  * success only after publication. Abort, failed writes and failed publication
@@ -33,6 +39,7 @@ int recomp_atomic_file_commit(RecompAtomicFile *);
 void recomp_atomic_file_abort(RecompAtomicFile *);
 /* Buffer convenience API using the same transaction owner. */
 int recomp_atomic_file_store(const char *, const void *, size_t);
+int recomp_atomic_file_create(const char *, const void *, size_t);
 #ifdef __cplusplus
 }
 #endif
