@@ -70,5 +70,41 @@ int main() {
     std::thread b([&]{CHECK(recomp_atomic_file_store("concurrent.sav",latest,4));});a.join();b.join();
     const auto concurrent=read("concurrent.sav");CHECK(concurrent.size()==4);
     CHECK(concurrent==std::vector<unsigned char>(initial,initial+4) || concurrent==std::vector<unsigned char>(latest,latest+4));
+    // An accepted prefix is never published when a later write exceeds its
+    // budget, or when its serializer aborts. Failed writes are sticky.
+    auto* stream=recomp_atomic_file_begin("native.sav",4);CHECK(stream);
+    CHECK(recomp_atomic_file_write(stream,initial,2));
+    CHECK(recomp_atomic_file_flush(stream));
+    CHECK(!recomp_atomic_file_write(stream,latest,3));
+    CHECK(!recomp_atomic_file_write(stream,initial,1));
+    CHECK(!recomp_atomic_file_commit(stream));CHECK(read("native.sav")[0]==99);
+    stream=recomp_atomic_file_begin("native.sav",4);CHECK(stream);
+    CHECK(recomp_atomic_file_write(stream,initial,2));
+    recomp_atomic_file_abort(stream);CHECK(read("native.sav")[0]==99);
+    stream=recomp_atomic_file_begin("native.sav",4);CHECK(stream);
+    CHECK(!recomp_atomic_file_write(stream,nullptr,1));
+    CHECK(!recomp_atomic_file_commit(stream));CHECK(read("native.sav")[0]==99);
+    CHECK(!recomp_atomic_file_begin("missing/target",4));
+    stream=recomp_atomic_file_begin("empty.sav",0);CHECK(stream);
+    CHECK(recomp_atomic_file_write(stream,nullptr,0));
+    CHECK(recomp_atomic_file_commit(stream));CHECK(read("empty.sav").empty());
+    // Both transactions can remain open with interleaved writes. Only commit
+    // exposes their complete bytes, and aborting one never removes the other.
+    auto* left=recomp_atomic_file_begin("concurrent.sav",4);
+    auto* right=recomp_atomic_file_begin("concurrent.sav",4);CHECK(left&&right);
+    CHECK(recomp_atomic_file_write(left,initial,2));
+    CHECK(recomp_atomic_file_write(right,latest,2));
+    CHECK(recomp_atomic_file_write(left,initial+2,2));
+    CHECK(recomp_atomic_file_commit(left));
+    CHECK(read("concurrent.sav")==std::vector<unsigned char>(initial,initial+4));
+    CHECK(recomp_atomic_file_write(right,latest+2,2));
+    CHECK(recomp_atomic_file_commit(right));
+    CHECK(read("concurrent.sav")==std::vector<unsigned char>(latest,latest+4));
+    std::ofstream("foreign.tmp")<<"untouched";
+    stream=recomp_atomic_file_begin("native.sav",0);CHECK(stream);
+    recomp_atomic_file_abort(stream);
+    CHECK(read("foreign.tmp")==std::vector<unsigned char>({'u','n','t','o','u','c','h','e','d'}));
+    for(const auto& entry:std::filesystem::directory_iterator("."))
+        CHECK(entry.path().filename().string().find(".tmp-")==std::string::npos);
     return failures?1:0;
 }
