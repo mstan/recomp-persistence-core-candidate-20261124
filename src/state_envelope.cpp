@@ -253,7 +253,7 @@ bool write_state(const fs::path& path, StateHeader header, const std::vector<std
     if (size > std::numeric_limits<std::uint64_t>::max() - overhead)
         return fail("state envelope size overflow");
     const auto utf8_path=path.u8string();
-    auto* file = recomp_atomic_file_begin(utf8_path.c_str(), overhead + size);
+    auto* file = recomp_atomic_file_begin(reinterpret_cast<const char*>(utf8_path.c_str()), overhead + size);
     if (!file) return fail("cannot create atomic state transaction");
     if (!recomp_atomic_file_write(file, head.data(), head.size()) ||
         (has_thumb && !recomp_atomic_file_write(file, thumb.data(), thumb.size())) ||
