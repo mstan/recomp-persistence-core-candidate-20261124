@@ -1,10 +1,10 @@
 name: Atomic file portability
 on:
   pull_request:
-    paths: ['src/atomic_file.c', 'include/recomp_persistence/atomic_file.h', 'tests/exclusive.cpp', '.github/workflows/atomic-portability.yml']
+    paths: ['src/atomic_file.c', 'src/state_envelope.cpp', 'include/recomp_persistence/**', 'tests/exclusive.cpp', 'tests/envelope.cpp', '.github/workflows/atomic-portability.yml']
   push:
     branches: [main]
-    paths: ['src/atomic_file.c', 'include/recomp_persistence/atomic_file.h', 'tests/exclusive.cpp', '.github/workflows/atomic-portability.yml']
+    paths: ['src/atomic_file.c', 'src/state_envelope.cpp', 'include/recomp_persistence/**', 'tests/exclusive.cpp', 'tests/envelope.cpp', '.github/workflows/atomic-portability.yml']
 jobs:
   atomic-create:
     strategy:
@@ -19,3 +19,7 @@ jobs:
           c++ -std=c++17 -Wall -Wextra -pthread -Iinclude tests/exclusive.cpp atomic.o -o exclusive-test
       - name: Check real filesystem publication
         run: ./exclusive-test
+      - name: Compile C++20 envelope implementation
+        run: c++ -std=c++20 -Wall -Wextra -pthread -Iinclude tests/envelope.cpp src/state_envelope.cpp src/sha256.cpp atomic.o -lz -o envelope-cxx20-test
+      - name: Check C++20 envelope roundtrip
+        run: ./envelope-cxx20-test

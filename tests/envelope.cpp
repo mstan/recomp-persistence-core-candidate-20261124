@@ -40,6 +40,15 @@ void test_envelope(const fs::path& dir) {
     CHECK(back.identity.accessories.size() == 2 && back.identity.accessories[1].content_sha256.empty());
     CHECK(state::check_state(back, id, got).empty());
 
+    // Native Unicode paths must use UTF-8 bytes at the C boundary under both
+    // C++17's std::string and C++20's std::u8string representation.
+    const auto unicode_path = dir / fs::u8path("env-\xCE\xBB-\xE7\x8C\xAB.rstate");
+    CHECK(state::write_state(unicode_path, h, {}, bytes.data(), bytes.size(), &err));
+    state::StateHeader unicode_header;
+    std::vector<std::uint8_t> unicode_bytes;
+    CHECK(state::read_state(unicode_path, unicode_header, unicode_bytes, &err));
+    CHECK(unicode_bytes == bytes && unicode_header.frame_number == h.frame_number);
+
     auto refused = [&](state::StateIdentity running, const std::string& want) {
         const std::string why = state::check_state(back, running, got);
         if (why.find(want) != 0) {
