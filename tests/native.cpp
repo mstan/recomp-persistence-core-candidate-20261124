@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -60,6 +61,19 @@ int main() {
         CHECK(read("native.sav")[0]==99);
         CloseHandle(locked);
     }
+    CHECK(recomp_atomic_file_store("shareable.sav",initial,4));
+    HANDLE shareable=CreateFileW(L"shareable.sav",GENERIC_READ|GENERIC_WRITE,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,nullptr);
+    CHECK(shareable!=INVALID_HANDLE_VALUE);
+    if(shareable!=INVALID_HANDLE_VALUE){
+        CHECK(recomp_atomic_file_store("shareable.sav",latest,4));
+        CHECK(read("shareable.sav")==std::vector<unsigned char>(latest,latest+4));
+        unsigned char retired[4]={};DWORD received=0;
+        CHECK(ReadFile(shareable,retired,4,&received,nullptr)&&received==4);
+        CHECK(!std::memcmp(retired,initial,4));
+        CloseHandle(shareable);
+    }
 #endif
     std::filesystem::create_directory("destination-directory");
     std::ofstream("destination-directory/keep.txt")<<"preserved";
@@ -70,5 +84,67 @@ int main() {
     std::thread b([&]{CHECK(recomp_atomic_file_store("concurrent.sav",latest,4));});a.join();b.join();
     const auto concurrent=read("concurrent.sav");CHECK(concurrent.size()==4);
     CHECK(concurrent==std::vector<unsigned char>(initial,initial+4) || concurrent==std::vector<unsigned char>(latest,latest+4));
+    // An accepted prefix is never published when a later write exceeds its
+    // budget, or when its serializer aborts. Failed writes are sticky.
+    auto* stream=recomp_atomic_file_begin("native.sav",4);CHECK(stream);
+    CHECK(recomp_atomic_file_write(stream,initial,2));
+    CHECK(recomp_atomic_file_flush(stream));
+    CHECK(!recomp_atomic_file_write(stream,latest,3));
+    CHECK(!recomp_atomic_file_write(stream,initial,1));
+    CHECK(!recomp_atomic_file_commit(stream));CHECK(read("native.sav")[0]==99);
+    stream=recomp_atomic_file_begin("native.sav",4);CHECK(stream);
+    CHECK(recomp_atomic_file_write(stream,initial,2));
+    recomp_atomic_file_abort(stream);CHECK(read("native.sav")[0]==99);
+    stream=recomp_atomic_file_begin("native.sav",4);CHECK(stream);
+    CHECK(!recomp_atomic_file_write(stream,nullptr,1));
+    CHECK(!recomp_atomic_file_commit(stream));CHECK(read("native.sav")[0]==99);
+    CHECK(!recomp_atomic_file_begin("missing/target",4));
+    stream=recomp_atomic_file_begin("empty.sav",0);CHECK(stream);
+    CHECK(recomp_atomic_file_write(stream,nullptr,0));
+    CHECK(recomp_atomic_file_commit(stream));CHECK(read("empty.sav").empty());
+    // Both transactions can remain open with interleaved writes. Only commit
+    // exposes their complete bytes, and aborting one never removes the other.
+    auto* left=recomp_atomic_file_begin("concurrent.sav",4);
+    auto* right=recomp_atomic_file_begin("concurrent.sav",4);CHECK(left&&right);
+    CHECK(recomp_atomic_file_write(left,initial,2));
+    CHECK(recomp_atomic_file_write(right,latest,2));
+    CHECK(recomp_atomic_file_write(left,initial+2,2));
+    CHECK(recomp_atomic_file_commit(left));
+    CHECK(read("concurrent.sav")==std::vector<unsigned char>(initial,initial+4));
+    CHECK(recomp_atomic_file_write(right,latest+2,2));
+    CHECK(recomp_atomic_file_commit(right));
+    CHECK(read("concurrent.sav")==std::vector<unsigned char>(latest,latest+4));
+    std::ofstream("foreign.tmp")<<"untouched";
+    stream=recomp_atomic_file_begin("native.sav",0);CHECK(stream);
+    recomp_atomic_file_abort(stream);
+    CHECK(read("foreign.tmp")==std::vector<unsigned char>({'u','n','t','o','u','c','h','e','d'}));
+    // Relative paths belong to the transaction, not the process's later CWD.
+    const auto original_directory=std::filesystem::current_path();
+    const auto owner_directory=original_directory/"cwd-owner";
+    const auto other_directory=original_directory/"cwd-other";
+    std::filesystem::create_directories(owner_directory);
+    std::filesystem::create_directories(other_directory/"cwd-owner");
+    std::ofstream(other_directory/"cwd-owner/owned.sav")<<"foreign";
+    CHECK(recomp_atomic_file_store("cwd-owner/owned.sav",latest,4));
+    stream=recomp_atomic_file_begin("cwd-owner/owned.sav",4);CHECK(stream);
+    CHECK(recomp_atomic_file_write(stream,initial,4));
+    std::filesystem::current_path(other_directory);
+    CHECK(recomp_atomic_file_commit(stream));
+    CHECK(read((owner_directory/"owned.sav").u8string().c_str())==std::vector<unsigned char>(initial,initial+4));
+    std::filesystem::current_path(original_directory);
+    stream=recomp_atomic_file_begin("cwd-owner/owned.sav",4);CHECK(stream);
+    CHECK(recomp_atomic_file_write(stream,latest,4));
+    std::filesystem::current_path(other_directory);
+    recomp_atomic_file_abort(stream);
+    CHECK(read((owner_directory/"owned.sav").u8string().c_str())==std::vector<unsigned char>(initial,initial+4));
+    CHECK(read("cwd-owner/owned.sav")==std::vector<unsigned char>({'f','o','r','e','i','g','n'}));
+    unsigned owned_files=0;
+    for(const auto& entry:std::filesystem::directory_iterator(owner_directory)){
+        ++owned_files;CHECK(entry.path().filename()=="owned.sav");
+    }
+    CHECK(owned_files==1);
+    std::filesystem::current_path(original_directory);
+    for(const auto& entry:std::filesystem::directory_iterator("."))
+        CHECK(entry.path().filename().string().find(".tmp-")==std::string::npos);
     return failures?1:0;
 }
