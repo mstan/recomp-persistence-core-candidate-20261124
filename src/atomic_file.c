@@ -5,6 +5,7 @@
 #endif
 #include "recomp_persistence/atomic_file.h"
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -246,7 +247,31 @@ int recomp_atomic_file_write(RecompAtomicFile *file,const void *data,size_t byte
     if((!data&&bytes)||(uint64_t)bytes>file->limit-file->written){
         file->failed=1;return 0;
     }
-    if(bytes&&fwrite(data,1,bytes,file->stream)!=bytes){file->failed=1;return 0;}
+    if(file->mode==NATIVE_EXCLUSIVE_CREATE){
+        /* Retain native creation's write semantics, including POSIX short
+         * writes/EINTR. The FILE owns this same descriptor/handle but has no
+         * buffered I/O; commit still owns synchronization and final close. */
+        size_t offset=0;
+        while(offset<bytes){
+#ifdef _WIN32
+            size_t remaining=bytes-offset;
+            DWORD chunk=remaining>UINT32_MAX?UINT32_MAX:(DWORD)remaining;
+            DWORD written=0;
+            if(!WriteFile((HANDLE)_get_osfhandle(_fileno(file->stream)),
+                          (const unsigned char*)data+offset,chunk,&written,NULL)||written!=chunk){
+                file->failed=1;return 0;
+            }
+            offset+=written;
+#else
+            size_t remaining=bytes-offset;
+            if(remaining>(size_t)SSIZE_MAX)remaining=(size_t)SSIZE_MAX;
+            ssize_t written=write(fileno(file->stream),(const unsigned char*)data+offset,remaining);
+            if(written<0&&errno==EINTR)continue;
+            if(written<=0){file->failed=1;return 0;}
+            offset+=(size_t)written;
+#endif
+        }
+    }else if(bytes&&fwrite(data,1,bytes,file->stream)!=bytes){file->failed=1;return 0;}
     file->written+=(uint64_t)bytes;return 1;
 }
 
