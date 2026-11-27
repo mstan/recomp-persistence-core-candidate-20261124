@@ -245,11 +245,24 @@ bool write_state(const fs::path& path, StateHeader header, const std::vector<std
     std::error_code ec;
     if (path.has_parent_path()) fs::create_directories(path.parent_path(), ec);
     if (ec) return fail("cannot create state directory: " + ec.message());
-    if (has_thumb) head.append(reinterpret_cast<const char*>(thumb.data()), thumb.size());
-    put_u64(head, size);
-    if (size) head.append(static_cast<const char*>(state), static_cast<std::size_t>(size));
+    // Preserve the wire format while borrowing the already-owned state and
+    // thumbnail. Do not allocate/copy another complete snapshot envelope.
+    std::string state_length;
+    put_u64(state_length, size);
+    const std::uint64_t overhead = head.size() + (has_thumb ? thumb.size() : 0) + state_length.size();
+    if (size > std::numeric_limits<std::uint64_t>::max() - overhead)
+        return fail("state envelope size overflow");
     const auto utf8_path=path.u8string();
-    if (!recomp_atomic_file_store(utf8_path.c_str(), head.data(), head.size()))
+    auto* file = recomp_atomic_file_begin(utf8_path.c_str(), overhead + size);
+    if (!file) return fail("cannot create atomic state transaction");
+    if (!recomp_atomic_file_write(file, head.data(), head.size()) ||
+        (has_thumb && !recomp_atomic_file_write(file, thumb.data(), thumb.size())) ||
+        !recomp_atomic_file_write(file, state_length.data(), state_length.size()) ||
+        !recomp_atomic_file_write(file, state, static_cast<std::size_t>(size))) {
+        recomp_atomic_file_abort(file);
+        return fail("atomic state write failed");
+    }
+    if (!recomp_atomic_file_commit(file))
         return fail("atomic state publication failed");
     return true;
 }

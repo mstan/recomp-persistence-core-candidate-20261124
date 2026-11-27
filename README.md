@@ -22,6 +22,8 @@ Slot names are derived from bounded zero-based indices. Header-only slot listing
 
 SlotStore clears optional compatibility promises and binds disposable snapshots to the current build. No old-state migration is required. The lower-level inherited `retro::state` envelope API remains available, including its explicit compatibility fields, but does not bypass SlotStore's build-specific policy.
 
+Envelope publication streams its header, thumbnail and already-owned state bytes through one bounded file transaction, preserving the existing format without allocating a second complete envelope/state image.
+
 RewindStore holds engine-owned snapshots within an explicit byte budget and evicts oldest complete entries. It does not serialize the machine or choose a rewind schedule. Native persistent progress is a separate API/directory contract; never use a snapshot slot path for a native save.
 
 ## Native saves and atomic files
