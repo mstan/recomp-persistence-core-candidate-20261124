@@ -54,7 +54,10 @@ private:
 // or machine callbacks. Evicts oldest complete snapshots to honor byte budget.
 class RewindStore {
 public:
-    explicit RewindStore(std::size_t byte_budget) : budget_(byte_budget) {}
+    explicit RewindStore(std::size_t byte_budget) : RewindStore(byte_budget, 0) {}
+    // Zero count keeps the original byte-budget-only policy.
+    RewindStore(std::size_t byte_budget, std::size_t max_entries)
+        : budget_(byte_budget), max_entries_(max_entries) {}
     bool push(std::uint64_t frame, std::vector<std::uint8_t> snapshot);
     bool pop(std::uint64_t& frame, std::vector<std::uint8_t>& snapshot);
     std::size_t bytes() const { return bytes_; }
@@ -62,7 +65,7 @@ public:
     void clear();
 private:
     struct Entry { std::uint64_t frame;std::vector<std::uint8_t> bytes; };
-    std::size_t budget_, bytes_ = 0;
+    std::size_t budget_, max_entries_, bytes_ = 0;
     std::deque<Entry> states_;
 };
 }

@@ -47,6 +47,21 @@ int main() {
     CHECK(rewind.count()==2 && rewind.bytes()==6);std::vector<unsigned char> got;std::uint64_t frame=0;
     CHECK(rewind.pop(frame,got));CHECK(frame==3 && got[0]==7);CHECK(rewind.pop(frame,got));CHECK(frame==2 && got[0]==4);
     CHECK(!rewind.pop(frame,got));CHECK(!rewind.push(4,std::vector<unsigned char>(7)));rewind.clear();CHECK(!rewind.count());
+    RewindStore counted(16,2);
+    CHECK(counted.push(10,{1}));CHECK(counted.push(11,{2,3}));CHECK(counted.push(12,{4,5,6}));
+    CHECK(counted.count()==2 && counted.bytes()==5);
+    CHECK(counted.pop(frame,got) && frame==12 && got.size()==3);
+    CHECK(counted.pop(frame,got) && frame==11 && got.size()==2);
+    CHECK(!counted.pop(frame,got));
+    RewindStore unlimited(16,0);
+    for(unsigned i=0;i<5;++i)CHECK(unlimited.push(i,{1}));
+    CHECK(unlimited.count()==5 && unlimited.bytes()==5);
+    RewindStore both(4,3);
+    CHECK(both.push(1,{1,2,3}));CHECK(both.push(2,{4,5}));
+    CHECK(both.count()==1 && both.bytes()==2);
+    CHECK(!both.push(3,std::vector<unsigned char>(5)));
+    CHECK(both.count()==1 && both.bytes()==2);
+    CHECK(both.pop(frame,got) && frame==2 && got[0]==4);
     CHECK(retro::runner::sha256_hex("abc",3)=="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     return failures?1:0;
 }

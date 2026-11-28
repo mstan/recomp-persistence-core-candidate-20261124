@@ -113,8 +113,14 @@ bool SlotStore::load(unsigned slot,std::string& error) {
 }
 bool RewindStore::push(std::uint64_t frame,std::vector<std::uint8_t> snapshot) {
     if(snapshot.empty() || snapshot.size()>budget_) return false;
-    while(bytes_>budget_-snapshot.size()) {bytes_-=states_.front().bytes.size();states_.pop_front();}
-    bytes_+=snapshot.size();states_.push_back({frame,std::move(snapshot)});return true;
+    // Allocate the new deque entry before evicting accepted history. If
+    // allocation fails the existing complete snapshots are unchanged.
+    const auto added=snapshot.size();
+    states_.push_back({frame,std::move(snapshot)});
+    while(bytes_>budget_-added || (max_entries_ && states_.size()>max_entries_)) {
+        bytes_-=states_.front().bytes.size();states_.pop_front();
+    }
+    bytes_+=added;return true;
 }
 bool RewindStore::pop(std::uint64_t& frame,std::vector<std::uint8_t>& snapshot) {
     if(states_.empty()) return false;
